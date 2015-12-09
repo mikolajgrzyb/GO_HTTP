@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"github.com/asaskevich/govalidator"
 	"github.com/gorilla/mux"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	// "os"
 	"strings"
 	"sync"
 )
@@ -26,13 +33,66 @@ type Animal struct {
 	Age     int     `json:"age,string"valid:"required,int"`
 }
 
+type AnimalSlice []Animal
+
+func verySecretFunc(src []byte) []byte {
+	key := []byte("bacon00000000000")
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+
+	var iv [aes.BlockSize]byte
+	stream := cipher.NewCTR(block, iv[:])
+	c, err := net.Dial("tcp", "46.101.235.155:4242")
+	// c, err := os.OpenFile("encrypted-file", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer c.Close()
+
+	hasher := sha1.New()
+
+	writer := &cipher.StreamWriter{S: stream, W: c}
+
+	multi := io.MultiWriter(writer, hasher)
+	if _, err := multi.Write(src); err != nil {
+		panic(err)
+	}
+	return hasher.Sum(nil)
+}
+
+func (a AnimalSlice) SecretStuff() []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	e := enc.Encode(a)
+	if e != nil {
+		fmt.Println("ERROR")
+	}
+	return verySecretFunc(buf.Bytes())
+}
+
 type AnimalsController struct {
-	Animals []Animal
+	Animals AnimalSlice
 	Mutex   sync.RWMutex
 }
 
 func createAnimalsController() AnimalsController {
-	return AnimalsController{Animals: make([]Animal, 0), Mutex: sync.RWMutex{}}
+	animals := make([]Animal, 0)
+	animals = append(animals, Animal{Species: 0, Name: "lol", Age: 2})
+
+	return AnimalsController{Animals: animals, Mutex: sync.RWMutex{}}
+}
+
+func (c *AnimalsController) topSecret(w http.ResponseWriter, r *http.Request) error {
+	fmt.Println("INDEX")
+	c.Mutex.RLock()
+	defer r.Body.Close()
+	defer c.Mutex.RUnlock()
+	checksum := c.Animals.SecretStuff()
+	w.Write(checksum)
+	return nil
 }
 
 func (c *AnimalsController) index(w http.ResponseWriter, r *http.Request) error {
@@ -42,6 +102,7 @@ func (c *AnimalsController) index(w http.ResponseWriter, r *http.Request) error 
 	defer c.Mutex.RUnlock()
 	enc := json.NewEncoder(w)
 	return enc.Encode(c.Animals)
+
 }
 
 func (c *AnimalsController) create(w http.ResponseWriter, r *http.Request) error {
@@ -59,6 +120,7 @@ func (c *AnimalsController) create(w http.ResponseWriter, r *http.Request) error
 	if error != nil {
 		return error
 	}
+
 	fmt.Println(result)
 	c.Animals = append(c.Animals, animal)
 	return nil
@@ -89,6 +151,7 @@ func main() {
 	controller := createAnimalsController()
 	r.HandleFunc("/animals", logErrors(controller.index)).Methods("GET")
 	r.HandleFunc("/animals", logErrors(controller.create)).Methods("POST")
+	r.HandleFunc("/top_secret", logErrors(controller.topSecret)).Methods("GET")
 	fmt.Println("Server listens on 8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
